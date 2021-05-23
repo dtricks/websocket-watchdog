@@ -10,7 +10,7 @@ use tungstenite::{Message, Result};
 async fn accept_connection(
     peer: SocketAddr,
     stream: TcpStream,
-    rx: crossbeam_channel::Receiver<notify::event::Event>,
+    rx: multiqueue::BroadcastReceiver<notify::event::Event>,
 ) {
     if let Err(e) = handle_connection(peer, stream, rx).await {
         match e {
@@ -23,7 +23,7 @@ async fn accept_connection(
 async fn handle_connection(
     peer: SocketAddr,
     stream: TcpStream,
-    rx: crossbeam_channel::Receiver<notify::event::Event>,
+    rx: multiqueue::BroadcastReceiver<notify::event::Event>,
 ) -> Result<()> {
     let ws_stream = accept_async(stream).await.expect("Failed to accept");
     info!("New WebSocket connection: {}", peer);
@@ -46,10 +46,11 @@ async fn main() {
     let addr = "127.0.0.1:9002";
     let listener = TcpListener::bind(&addr).await.expect("Can't listen");
     info!("Listening on: {}", addr);
-    let (tx, rx) = crossbeam_channel::unbounded();
+    //let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx, rx) = multiqueue::broadcast_queue(200);
     let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| match res {
         Ok(event) => {
-            tx.send(event).unwrap();
+            tx.try_send(event).unwrap();
         }
         Err(e) => {
             error!("Watch Error {}", e);
@@ -68,6 +69,6 @@ async fn main() {
             .expect("connected streams should have a peer address");
         info!("Peer address: {}", peer);
 
-        tokio::spawn(accept_connection(peer, stream, rx.clone()));
+        tokio::spawn(accept_connection(peer, stream, rx.add_stream()));
     }
 }
