@@ -1,5 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use log::*;
+use multiqueue::wait::BlockingWait;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::env;
 use std::net::SocketAddr;
@@ -14,7 +15,10 @@ async fn accept_connection(
 ) {
     if let Err(e) = handle_connection(peer, stream, rx).await {
         match e {
-            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
+            Error::Protocol(_) | Error::Utf8 => (),
+            Error::ConnectionClosed => {
+                info!("Connection closed with {}", peer);
+            }
             err => error!("Error processing connection: {}", err),
         }
     }
@@ -28,13 +32,26 @@ async fn handle_connection(
     let ws_stream = accept_async(stream).await.expect("Failed to accept");
     info!("New WebSocket connection: {}", peer);
     let (mut ws_sender, mut _ws_receiver) = ws_stream.split();
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
 
-    for event in rx {
-        ws_sender
-            .send(Message::Text(format!("{:?}\n", event)))
-            .await?;
-        info!("{:?}", event);
+    loop {
+        let res = rx.try_recv();
+        match res {
+            Ok(event) => {
+                ws_sender
+                    .send(Message::Text(format!("{:?}\n", event)))
+                    .await?
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                interval.tick().await;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                break;
+            }
+        }
     }
+    ws_sender.close().await?;
+    info!("Closed websocket connection to {}", peer);
     Ok(())
 }
 
@@ -43,14 +60,20 @@ async fn main() {
     env_logger::init();
     let path_str = env::args().nth(1).expect("First argument has to be a path");
 
-    let addr = "127.0.0.1:9002";
+    //let addr = "127.0.0.1:9002";
+    let addr = "0.0.0.0:9002";
     let listener = TcpListener::bind(&addr).await.expect("Can't listen");
     info!("Listening on: {}", addr);
-    //let (tx, rx) = crossbeam_channel::unbounded();
-    let (tx, rx) = multiqueue::broadcast_queue(200);
+    let (tx, rx) = multiqueue::broadcast_queue_with(1000, BlockingWait::new());
     let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| match res {
         Ok(event) => {
-            tx.try_send(event).unwrap();
+            info!("{:?}", event);
+            use std::sync::mpsc::TrySendError::*;
+            match tx.try_send(event) {
+                Ok(_) => (),
+                Err(Full(e)) => error!("Multiqueue full error {:?}", e),
+                Err(Disconnected(e)) => error!("Multiqueue disconnected error {:?}", e),
+            }
         }
         Err(e) => {
             error!("Watch Error {}", e);

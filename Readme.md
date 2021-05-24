@@ -23,4 +23,4 @@ firefox examples/client-js/index.html
 ## TODO
 
 - [x] fix: events are not distributed to all clients
-- [ ] fix: spin loop in receiver
+- [x] fix: spin loop in receiver
