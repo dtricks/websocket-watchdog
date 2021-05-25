@@ -5,8 +5,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::env;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{accept_async, tungstenite::Error};
-use tungstenite::{Message, Result};
+use tokio_tungstenite::{accept_async, accept_async_with_config, tungstenite::Error};
+use tungstenite::{protocol::WebSocketConfig, Message, Result};
 
 async fn accept_connection(
     peer: SocketAddr,
@@ -29,7 +29,15 @@ async fn handle_connection(
     stream: TcpStream,
     rx: multiqueue::BroadcastReceiver<notify::event::Event>,
 ) -> Result<()> {
-    let ws_stream = accept_async(stream).await.expect("Failed to accept");
+    let wsc = WebSocketConfig {
+        max_send_queue: None,
+        max_message_size: None,
+        max_frame_size: None,
+        accept_unmasked_frames: true,
+    };
+    let ws_stream = accept_async_with_config(stream, Some(wsc))
+        .await
+        .expect("Failed to accept");
     info!("New WebSocket connection: {}", peer);
     let (mut ws_sender, mut _ws_receiver) = ws_stream.split();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
