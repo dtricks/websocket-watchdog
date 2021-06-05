@@ -1,17 +1,17 @@
 use futures_util::{SinkExt, StreamExt};
 use log::*;
-use multiqueue::wait::BlockingWait;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::env;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{accept_async, accept_async_with_config, tungstenite::Error};
+use tokio::sync::broadcast::{self, channel, Receiver, Sender};
+use tokio_tungstenite::{accept_async_with_config, tungstenite::Error};
 use tungstenite::{protocol::WebSocketConfig, Message, Result};
 
 async fn accept_connection(
     peer: SocketAddr,
     stream: TcpStream,
-    rx: multiqueue::BroadcastReceiver<notify::event::Event>,
+    rx: &mut Receiver<notify::event::Event>,
 ) {
     if let Err(e) = handle_connection(peer, stream, rx).await {
         match e {
@@ -27,7 +27,7 @@ async fn accept_connection(
 async fn handle_connection(
     peer: SocketAddr,
     stream: TcpStream,
-    rx: multiqueue::BroadcastReceiver<notify::event::Event>,
+    rx: &mut Receiver<notify::event::Event>,
 ) -> Result<()> {
     let wsc = WebSocketConfig {
         max_send_queue: None,
@@ -50,10 +50,14 @@ async fn handle_connection(
                     .send(Message::Text(format!("{:?}\n", event)))
                     .await?
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
+            Err(broadcast::error::TryRecvError::Empty) => {
                 interval.tick().await;
             }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                interval.tick().await;
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                interval.tick().await;
                 break;
             }
         }
@@ -72,34 +76,38 @@ async fn main() {
     let addr = "0.0.0.0:9002";
     let listener = TcpListener::bind(&addr).await.expect("Can't listen");
     info!("Listening on: {}", addr);
-    let (tx, rx) = multiqueue::broadcast_queue_with(1000, BlockingWait::new());
-    let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| match res {
+    let (tx, _rx) = channel(20);
+    let mut watcher = create_watcher(&tx).await;
+    info!("created watcher");
+    watcher
+        .watch(std::path::Path::new(&path_str), RecursiveMode::Recursive)
+        .unwrap();
+    info!("started watching");
+    while let Ok((stream, _)) = listener.accept().await {
+        let peer = stream
+            .peer_addr()
+            .expect("connected streams should have a peer address");
+        info!("Peer address: {}", peer);
+        let mut send = tx.subscribe();
+        tokio::spawn(async move {
+            accept_connection(peer, stream, &mut send).await;
+        });
+    }
+}
+
+async fn create_watcher(s: &Sender<notify::event::Event>) -> RecommendedWatcher {
+    let s1 = s.clone();
+    Watcher::new_immediate(move |res| match res {
         Ok(event) => {
             info!("{:?}", event);
-            use std::sync::mpsc::TrySendError::*;
-            match tx.try_send(event) {
+            match s1.send(event) {
                 Ok(_) => (),
-                Err(Full(e)) => error!("Multiqueue full error {:?}", e),
-                Err(Disconnected(e)) => error!("Multiqueue disconnected error {:?}", e),
+                Err(e) => error!("Send error: {}", e),
             }
         }
         Err(e) => {
             error!("Watch Error {}", e);
         }
     })
-    .unwrap();
-    info!("created watcher");
-    watcher
-        .watch(std::path::Path::new(&path_str), RecursiveMode::Recursive)
-        .unwrap();
-    info!("started watching");
-
-    while let Ok((stream, _)) = listener.accept().await {
-        let peer = stream
-            .peer_addr()
-            .expect("connected streams should have a peer address");
-        info!("Peer address: {}", peer);
-
-        tokio::spawn(accept_connection(peer, stream, rx.add_stream()));
-    }
+    .unwrap()
 }
