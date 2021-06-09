@@ -1,6 +1,9 @@
 use futures_util::{SinkExt, StreamExt};
 use log::*;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+#[macro_use]
+use serde_json::json;
+use chrono::DateTime;
 use std::env;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
@@ -46,9 +49,19 @@ async fn handle_connection(
         let res = rx.try_recv();
         match res {
             Ok(event) => {
-                ws_sender
-                    .send(Message::Text(format!("{:?}\n", event)))
-                    .await?
+                let json = match serde_json::to_string(&json!({
+                    "kind": format!("{:?}", event.kind),
+                    "paths": event.paths,
+                    "timestamp": format!("{}", chrono::Utc::now())
+                })) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        error!("Json formatting error {}", e);
+                        continue;
+                    }
+                };
+
+                ws_sender.send(Message::Text(format!("{}\n", json))).await?
             }
             Err(broadcast::error::TryRecvError::Empty) => {
                 interval.tick().await;
